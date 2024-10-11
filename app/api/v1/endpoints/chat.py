@@ -87,35 +87,22 @@ async def upload_pdf(files: List[UploadFile] = File(...)):
 @router.post("/chat")
 async def chat(request: ChatRequest):
     try:
-        # 메시지 언어 감지 및 한국어 번역
         input_language = detect(request.message)
         translated_text = translator_ko.translate(request.message) if input_language != 'ko' else request.message
 
-        # 질문이 법률 관련인지 확인
         law_keywords = ["법", "규율", "조항", "규정", "법적", "항만공사법", "조례"]
         is_law_related = any(keyword in translated_text for keyword in law_keywords)
 
-        # 벡터 저장소 선택 및 검색
-        docs = []
-        if is_law_related and vector_store.law_vector_store:
-            law_retriever = vector_store.law_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
-            docs = law_retriever.get_relevant_documents(translated_text)
-
-        # 법률 관련 문서가 충분하지 않으면 일반 벡터 저장소에서도 검색
-        if len(docs) < 2 and vector_store.general_vector_store:
-            general_retriever = vector_store.general_vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
-            general_docs = general_retriever.get_relevant_documents(translated_text)
-            docs.extend(general_docs)
+        # FAISS와 Chroma를 결합한 검색 수행
+        docs = vector_store.similarity_search(translated_text, is_law_related=is_law_related, k=4)
 
         if not docs:
             return {"answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.", "is_law_related": is_law_related}
 
-        # OPENAI API 키를 가져옴
         api_key = settings.OPENAI_API_KEY.get_secret_value() if settings.OPENAI_API_KEY else None
         if api_key is None:
             raise HTTPException(status_code=500, detail="OpenAI API key is not set.")
 
-        # RAG 체인 설정 및 실행
         rag_chain = (
             {"context": RunnablePassthrough() | (lambda x: format_docs(docs)), "question": RunnablePassthrough()}
             | PORT_AUTHORITY_PROMPT
@@ -125,10 +112,8 @@ async def chat(request: ChatRequest):
 
         response = rag_chain.invoke(translated_text)
 
-        # 응답 포맷팅
         formatted_response = "\n\n".join(paragraph.strip() for paragraph in response.split('\n') if paragraph.strip())
 
-        # 응답을 원래 언어로 번역
         translated_response = translator_en.translate(formatted_response) if input_language != 'ko' else formatted_response
 
         return {
@@ -141,6 +126,8 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"Error in chat endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="An error occurred while processing your request.")
+
+
     
 @router.get("/check-vector-store")
 async def check_vector_store(is_law_related: bool = False):
